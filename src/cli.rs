@@ -29,6 +29,7 @@ pub enum Command {
     #[command(alias = "log")]
     Add(AddArgs),
     List(ListArgs),
+    Related(RelatedArgs),
     Resolve(ResolveArgs),
     Schema {
         #[arg(value_enum, default_value_t = SchemaTarget::All)]
@@ -71,6 +72,11 @@ pub struct AddArgs {
     pub evidence: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
+    #[arg(
+        long,
+        help = "Skip related-match advisory computation; exact duplicate detection still runs"
+    )]
+    pub no_check: bool,
 }
 
 #[derive(Debug, Args)]
@@ -89,6 +95,18 @@ pub struct ListArgs {
     pub limit: usize,
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     pub format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub struct RelatedArgs {
+    #[arg(value_name = "TEXT")]
+    pub text: String,
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    #[arg(long, default_value_t = 5)]
+    pub limit: usize,
+    #[arg(long, default_value_t = 0.0)]
+    pub min_score: f64,
 }
 
 #[derive(Debug, Args)]
@@ -167,6 +185,15 @@ mod tests {
         for args in [
             vec!["papercuts", "add", "-"],
             vec!["papercuts", "list", "--status", "all"],
+            vec![
+                "papercuts",
+                "related",
+                "ouch",
+                "--tag",
+                "tooling",
+                "--limit",
+                "3",
+            ],
             vec!["papercuts", "resolve", "abcd"],
             vec!["papercuts", "schema", "record"],
             vec!["papercuts", "doctor"],

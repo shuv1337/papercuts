@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use papercuts::commands::add::AddData;
 use papercuts::commands::doctor::DoctorData;
 use papercuts::commands::list::ListData;
+use papercuts::commands::related::RelatedData;
 use papercuts::commands::resolve::ResolveData;
 use papercuts::commands::resolve::ResolveManyData;
 use papercuts::error::exit_code_map;
@@ -1214,6 +1215,7 @@ fn every_command_success_envelope_deserializes() {
     assert_eq!(schema.data["contract"], 1);
     assert_eq!(schema.data["exit_codes"]["74"], "I/O error");
     assert_eq!(schema.data["commands"]["doctor"]["read_only"], true);
+    assert_eq!(schema.data["commands"]["related"]["read_only"], true);
     assert!(
         schema.data["commands"]["add"]["flags"]["--stderr-file"]
             .as_str()
@@ -1348,6 +1350,278 @@ fn list_filters_sorts_limits_since_and_markdown() {
         2,
         "invalid_argument",
     );
+}
+
+#[test]
+fn related_ranks_matches_and_includes_resolution_info() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let resolved_cut: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "cargo clippy fails on workspace lint configuration",
+                "--agent",
+                "tester",
+                "--tag",
+                "rust",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let _: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &resolved_cut.data.record.id,
+            "--agent",
+            "fixer",
+            "--note",
+            "use cargo clippy --all-targets from the repository root",
+        ],
+    ));
+    let _: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "browser screenshot crop is blurry",
+                "--agent",
+                "tester",
+                "--tag",
+                "browser",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let _: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "cargo test hangs on workspace lock",
+                "--agent",
+                "tester",
+                "--tag",
+                "rust",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+
+    let related: SuccessEnvelope<RelatedData> = success(&run_file(
+        &file,
+        &[
+            "related",
+            "workspace cargo clippy lint",
+            "--tag",
+            "rust",
+            "--limit",
+            "2",
+        ],
+    ));
+    assert_eq!(related.data.count, 2);
+    assert_eq!(related.data.total, 3);
+    assert!(related.data.truncated);
+    assert_eq!(
+        related.data.items[0].item.cut.id,
+        resolved_cut.data.record.id
+    );
+    assert_eq!(related.data.items[0].item.status, ItemStatus::Resolved);
+    assert_eq!(
+        related.data.items[0]
+            .item
+            .resolution
+            .as_ref()
+            .unwrap()
+            .note
+            .as_deref(),
+        Some("use cargo clippy --all-targets from the repository root")
+    );
+    assert!(related.data.items[0].score >= related.data.items[1].score);
+}
+
+#[test]
+fn add_appends_near_duplicate_resolved_cut_and_returns_resolution_advisory() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let original: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "workspace cargo clippy command fails because target dir is readonly",
+                "--agent",
+                "tester",
+                "--tag",
+                "rust",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let _: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &original.data.record.id,
+            "--agent",
+            "fixer",
+            "--note",
+            "set CARGO_TARGET_DIR to a writable temp directory",
+        ],
+    ));
+    let before = std::fs::read_to_string(&file).unwrap().lines().count();
+
+    let duplicate: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "workspace cargo clippy command fails because target directory is readonly",
+                "--agent",
+                "tester",
+                "--tag",
+                "rust",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(duplicate.data.changed);
+    assert_ne!(duplicate.data.record.id, original.data.record.id);
+    assert_eq!(
+        duplicate
+            .data
+            .related_resolution
+            .as_ref()
+            .unwrap()
+            .note
+            .as_deref(),
+        Some("set CARGO_TARGET_DIR to a writable temp directory")
+    );
+    assert_eq!(duplicate.data.related.len(), 1);
+    assert_eq!(duplicate.data.related[0].item.status, ItemStatus::Resolved);
+    assert!(duplicate.data.related[0].score >= 0.70);
+    assert!(
+        duplicate
+            .meta
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("see_also:"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        before + 1
+    );
+}
+
+#[test]
+fn add_proceeds_with_non_blocking_related_for_open_matches() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let original: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "browser screenshot crop command returns blurry thumbnails",
+                "--agent",
+                "tester",
+                "--tag",
+                "browser",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+
+    let related_add: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "browser screenshot crop command returns blurry images",
+                "--agent",
+                "tester",
+                "--tag",
+                "browser",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(related_add.data.changed);
+    assert_eq!(
+        related_add.data.related[0].item.cut.id,
+        original.data.record.id
+    );
+    assert_eq!(related_add.data.related[0].item.status, ItemStatus::Open);
+    assert!(related_add.data.related_resolution.is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 2);
+}
+
+#[test]
+fn add_no_check_skips_advisory_related_computation_only() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let original: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "rustdoc command crashes when workspace features are missing",
+                "--agent",
+                "tester",
+                "--tag",
+                "rust",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let _: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &original.data.record.id,
+            "--agent",
+            "fixer",
+            "--note",
+            "enable workspace features before rustdoc",
+        ],
+    ));
+
+    let forced: SuccessEnvelope<AddData> = success(
+        &command()
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "rustdoc command crashes when workspace feature flags are missing",
+                "--agent",
+                "tester",
+                "--tag",
+                "rust",
+                "--no-check",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(forced.data.changed);
+    assert!(forced.data.related.is_empty());
+    assert!(forced.data.related_resolution.is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 3);
 }
 
 #[test]

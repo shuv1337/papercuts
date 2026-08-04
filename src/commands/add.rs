@@ -1,8 +1,11 @@
 use crate::cli::AddArgs;
 use crate::error::{AppError, AppResult};
 use crate::output::{self, Meta};
+use crate::relevance::{self, Query, RelatedMatch};
 use crate::store;
-use crate::{CutRecord, Evidence, compute_id, format_timestamp, resolve_agent};
+use crate::{
+    CutRecord, Evidence, ItemStatus, Resolution, compute_id, format_timestamp, resolve_agent,
+};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 #[cfg(not(unix))]
@@ -15,11 +18,18 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 const STDERR_INPUT_LIMIT: u64 = 1024 * 1024;
+const RESOLVED_ADVISORY_THRESHOLD: f64 = 0.70;
+const ADVISORY_THRESHOLD: f64 = 0.35;
+const ADVISORY_LIMIT: usize = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddData {
     pub changed: bool,
     pub record: CutRecord,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<RelatedMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_resolution: Option<Resolution>,
 }
 
 pub fn run(args: AddArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -> AppResult<i32> {
@@ -88,21 +98,44 @@ pub fn run(args: AddArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -
     }
 
     let supplied_evidence = record.evidence.is_some();
-    let (changed, record) = if args.dry_run {
-        (false, record)
+    let (changed, record, related_corpus) = if args.dry_run {
+        (false, record, Vec::new())
     } else {
         store::with_exclusive(&resolved.path, true, |log| {
             let bytes = store::read_bytes(log, &resolved.path)?;
-            if let Some(existing) = store::fold_bytes(&bytes)
-                .items
-                .into_iter()
-                .find(|item| item.cut.id == record.id)
-            {
-                return Ok((false, existing.cut));
+            let folded = store::fold_bytes(&bytes);
+            if let Some(existing) = folded.items.iter().find(|item| item.cut.id == record.id) {
+                return Ok((false, existing.cut.clone(), Vec::new()));
             }
+
             store::append_json(log, &resolved.path, &bytes, &record)?;
-            Ok((true, record))
+            Ok((true, record.clone(), folded.items))
         })?
+    };
+    let (related, related_resolution) = if changed && !args.no_check {
+        let report = relevance::top_matches(
+            Query::new(&record.text, &record.tags, record.repo.as_deref()),
+            &related_corpus,
+            ADVISORY_LIMIT,
+            ADVISORY_THRESHOLD,
+        );
+        warnings.extend(report.warnings);
+        let related_resolution = report
+            .matches
+            .first()
+            .filter(|top| {
+                top.item.status == ItemStatus::Resolved && top.score >= RESOLVED_ADVISORY_THRESHOLD
+            })
+            .and_then(|top| {
+                warnings.push(format!(
+                    "see_also: closely matches resolved {} — check related_resolution.note, this may already be fixed",
+                    top.item.cut.id
+                ));
+                top.resolution().cloned()
+            });
+        (report.matches, related_resolution)
+    } else {
+        (Vec::new(), None)
     };
     if args.dry_run {
         warnings.push("dry run; no record appended".into());
@@ -120,8 +153,17 @@ pub fn run(args: AddArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -
     meta.file = Some(resolved.path.to_string_lossy().into_owned());
     meta.agent_source = Some(source.into());
     meta.warnings = warnings;
-    output::write_success(AddData { changed, record }, pretty, meta)
-        .map_err(|error| AppError::from_io(error, std::path::Path::new("stdout")))?;
+    output::write_success(
+        AddData {
+            changed,
+            record,
+            related,
+            related_resolution,
+        },
+        pretty,
+        meta,
+    )
+    .map_err(|error| AppError::from_io(error, std::path::Path::new("stdout")))?;
     Ok(0)
 }
 

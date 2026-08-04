@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod error;
 pub mod output;
+pub mod relevance;
 pub mod store;
 
 use crate::error::{AppError, AppResult};
