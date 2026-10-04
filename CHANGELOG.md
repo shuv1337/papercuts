@@ -13,7 +13,7 @@
 
 Note: an earlier iteration of this release added FastEmbed-based semantic scoring fused with BM25 via RRF. It was evaluated against the production log and dropped before shipping: on this tool's small, jargon-dense corpus, embedding similarity tracked BM25 rather than correcting it (two topically-distinct cuts sharing vocabulary still scored >=0.95 either way), while adding a real ~90MB model dependency and ~6s of latency per `add`. Not worth it; `related` stays pure lexical BM25 + tag Jaccard + repo match, unchanged from the original plan.
 
-## [0.3.0] - 2026-08-20 (superseded, folded into 0.4.0 above)
+## [0.3.0] - 2026-08-20 (superseded, never released; folded into 0.5.0 above)
 
 ### Added
 
