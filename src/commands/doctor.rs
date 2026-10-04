@@ -83,7 +83,7 @@ fn inspect(bytes: &[u8]) -> DoctorData {
     let mut findings = Vec::new();
     let mut cuts = HashMap::<String, Vec<u8>>::new();
     let mut cut_ids = HashSet::new();
-    let mut resolves = Vec::<(usize, String)>::new();
+    let mut resolves = Vec::<(usize, &str, String)>::new();
     let mut checked_lines = 0;
     let torn = !bytes.is_empty() && !bytes.ends_with(b"\n");
     let line_count = bytes.split(|byte| *byte == b'\n').count();
@@ -169,24 +169,31 @@ fn inspect(bytes: &[u8]) -> DoctorData {
                     message: format!("invalid cut record: {error}"),
                 }),
             },
-            Some("resolve") => match serde_json::from_value::<ResolveRecord>(value) {
-                Ok(resolve) => {
-                    if resolve.ts.parse::<jiff::Timestamp>().is_err() {
-                        findings.push(Finding {
-                            line,
-                            kind: "malformed".into(),
-                            message: "resolve ts is not a full RFC3339 timestamp".into(),
-                        });
-                        continue;
+            Some(kind @ ("resolve" | "reopen")) => {
+                let kind = if kind == "resolve" {
+                    "resolve"
+                } else {
+                    "reopen"
+                };
+                match serde_json::from_value::<ResolveRecord>(value) {
+                    Ok(event) => {
+                        if event.ts.parse::<jiff::Timestamp>().is_err() {
+                            findings.push(Finding {
+                                line,
+                                kind: "malformed".into(),
+                                message: format!("{kind} ts is not a full RFC3339 timestamp"),
+                            });
+                            continue;
+                        }
+                        resolves.push((line, kind, event.id));
                     }
-                    resolves.push((line, resolve.id));
+                    Err(error) => findings.push(Finding {
+                        line,
+                        kind: "malformed".into(),
+                        message: format!("invalid {kind} record: {error}"),
+                    }),
                 }
-                Err(error) => findings.push(Finding {
-                    line,
-                    kind: "malformed".into(),
-                    message: format!("invalid resolve record: {error}"),
-                }),
-            },
+            }
             Some(kind) => findings.push(Finding {
                 line,
                 kind: "unknown_kind".into(),
@@ -199,12 +206,12 @@ fn inspect(bytes: &[u8]) -> DoctorData {
             }),
         }
     }
-    for (line, id) in resolves {
+    for (line, kind, id) in resolves {
         if !cut_ids.contains(&id) {
             findings.push(Finding {
                 line,
-                kind: "orphan_resolve".into(),
-                message: format!("resolve references unknown cut {id}"),
+                kind: format!("orphan_{kind}"),
+                message: format!("{kind} references unknown cut {id}"),
             });
         }
     }

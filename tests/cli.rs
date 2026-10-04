@@ -2611,3 +2611,158 @@ fn error_envelope_matrix() {
         "ambiguous_id",
     );
 }
+
+#[test]
+fn reopen_then_resolve_replaces_a_stale_resolution_note() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let id = add(&file, "reopen me").data.record.id;
+    let other = add(&file, "still open").data.record.id;
+    success::<ResolveData>(&run_file(
+        &file,
+        &[
+            "resolve",
+            &id,
+            "--agent",
+            "fixer",
+            "--note",
+            "fixed in abandoned change",
+        ],
+    ));
+
+    // A second resolve cannot correct the note; it is an idempotent no-op.
+    let again: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &["resolve", &id, "--note", "handed off: issue 7"],
+    ));
+    assert!(!again.data.changed);
+    assert_eq!(
+        again.data.record.resolution.unwrap().note.as_deref(),
+        Some("fixed in abandoned change")
+    );
+
+    let before = std::fs::read(&file).unwrap();
+    let dry: SuccessEnvelope<ResolveData> =
+        success(&run_file(&file, &["reopen", &id, "--dry-run"]));
+    assert!(!dry.data.changed);
+    assert_eq!(dry.data.record.status, ItemStatus::Open);
+    assert_eq!(dry.meta.warnings, ["dry run; no reopen event appended"]);
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+
+    let reopened: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "reopen",
+            &id[..8],
+            "--agent",
+            "triager",
+            "--note",
+            "change abandoned",
+        ],
+    ));
+    assert!(reopened.data.changed);
+    assert_eq!(reopened.data.record.status, ItemStatus::Open);
+    assert!(reopened.data.record.resolution.is_none());
+    let reopening = reopened.data.record.reopened.unwrap();
+    assert_eq!(reopening.agent, "triager");
+    assert_eq!(reopening.note.as_deref(), Some("change abandoned"));
+    let appended = std::fs::read_to_string(&file).unwrap();
+    let last: Value = serde_json::from_str(appended.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        last,
+        json!({"kind":"reopen","id":id,"ts":"2026-07-09T18:30:00.123Z","agent":"triager","note":"change abandoned"})
+    );
+
+    let open_again: SuccessEnvelope<ResolveData> = success(&run_file(&file, &["reopen", &id]));
+    assert!(!open_again.data.changed);
+    assert_eq!(open_again.meta.warnings, ["already open"]);
+
+    let mixed: SuccessEnvelope<ResolveManyData> =
+        success(&run_file(&file, &["reopen", &id, &other]));
+    assert!(!mixed.data.changed);
+    assert_eq!(mixed.meta.warnings, ["already open"]);
+
+    let resolved: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &id,
+            "--agent",
+            "triager",
+            "--note",
+            "handed off: issue 7",
+        ],
+    ));
+    assert!(resolved.data.changed);
+    let listed: SuccessEnvelope<ListData> =
+        success(&run_file(&file, &["list", "--status", "resolved"]));
+    assert_eq!(listed.data.count, 1);
+    let item = &listed.data.items[0];
+    assert_eq!(
+        item.resolution.as_ref().unwrap().note.as_deref(),
+        Some("handed off: issue 7")
+    );
+    assert_eq!(
+        item.reopened.as_ref().unwrap().note.as_deref(),
+        Some("change abandoned")
+    );
+    assert!(listed.meta.warnings.is_empty());
+
+    let doctor: SuccessEnvelope<DoctorData> = success(&run_file(&file, &["doctor"]));
+    assert!(doctor.data.healthy, "{:?}", doctor.data.findings);
+
+    error(&run_file(&file, &["reopen", "deadbeef"]), 66, "not_found");
+    error(&run_file(&file, &["reopen", "abc"]), 2, "invalid_argument");
+}
+
+#[test]
+fn doctor_reports_orphan_reopen_and_schema_documents_reopen() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    add(&file, "anchor");
+    let mut log = OpenOptions::new().append(true).open(&file).unwrap();
+    writeln!(
+        log,
+        "{}",
+        json!({"kind":"reopen","id":"pc_deadbeef0000","ts":"2026-07-10T00:00:00.000Z","agent":"a","note":null})
+    )
+    .unwrap();
+    let output = run_file(&file, &["doctor"]);
+    assert_eq!(output.status.code(), Some(1));
+    let doctor: SuccessEnvelope<DoctorData> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor.data.findings.len(), 1);
+    assert_eq!(doctor.data.findings[0].kind, "orphan_reopen");
+
+    let schema: SuccessEnvelope<Value> = success(&run(&["schema"]));
+    assert_eq!(schema.data["commands"]["reopen"]["appends"], true);
+    assert_eq!(schema.data["records"]["reopen"]["kind"], "reopen");
+}
+
+#[test]
+fn eight_way_reopen_race_appends_once() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let id = add(&file, "reopen race").data.record.id;
+    success::<ResolveData>(&run_file(&file, &["resolve", &id, "--agent", "race"]));
+    let barrier = Arc::new(Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let file = file.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let envelope: SuccessEnvelope<ResolveData> =
+                    success(&run_file(&file, &["reopen", &id, "--agent", "race"]));
+                envelope.data.changed
+            })
+        })
+        .collect();
+    let changed = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .filter(|changed| *changed)
+        .count();
+    assert_eq!(changed, 1);
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 3);
+}

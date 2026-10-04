@@ -31,7 +31,27 @@ struct WarningCounts {
     unknown: usize,
     duplicate_cuts: usize,
     duplicate_resolves: usize,
+    redundant_reopens: usize,
     orphans: usize,
+    orphan_reopens: usize,
+}
+
+/// Status of one ID after replaying its resolve/reopen events in file order.
+#[derive(Default)]
+struct StatusState {
+    resolution: Option<Resolution>,
+    reopened: Option<Resolution>,
+    resolved_seen: bool,
+    reopen_seen: bool,
+    redundant_reopens: usize,
+}
+
+fn as_resolution(event: &ResolveRecord) -> Resolution {
+    Resolution {
+        ts: event.ts.clone(),
+        agent: event.agent.clone(),
+        note: event.note.clone(),
+    }
 }
 
 pub fn discover(flag: Option<PathBuf>) -> AppResult<ResolvedFile> {
@@ -243,7 +263,7 @@ fn append_bytes_with(
 
 pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
     let mut cuts = BTreeMap::<String, CutRecord>::new();
-    let mut resolves = HashMap::<String, ResolveRecord>::new();
+    let mut states = HashMap::<String, StatusState>::new();
     let mut counts = WarningCounts::default();
     let complete_len = if bytes.is_empty() || bytes.ends_with(b"\n") {
         bytes.len()
@@ -265,7 +285,8 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
             counts.malformed += 1;
             continue;
         };
-        match value.get("kind").and_then(Value::as_str) {
+        let kind = value.get("kind").and_then(Value::as_str).map(str::to_owned);
+        match kind.as_deref() {
             Some("cut") => match serde_json::from_value::<CutRecord>(value) {
                 Ok(mut cut) => {
                     if cut.ts.parse::<jiff::Timestamp>().is_err() {
@@ -281,45 +302,63 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
                 }
                 Err(_) => counts.malformed += 1,
             },
-            Some("resolve") => match serde_json::from_value::<ResolveRecord>(value) {
-                Ok(resolve) => {
-                    if resolve.ts.parse::<jiff::Timestamp>().is_err() {
-                        counts.malformed += 1;
-                        continue;
+            Some(kind @ ("resolve" | "reopen")) => {
+                match serde_json::from_value::<ResolveRecord>(value) {
+                    Ok(event) => {
+                        if event.ts.parse::<jiff::Timestamp>().is_err() {
+                            counts.malformed += 1;
+                            continue;
+                        }
+                        // Status events for one ID replay in file order; the cut line may sit anywhere.
+                        let state = states.entry(event.id.clone()).or_default();
+                        if kind == "resolve" {
+                            state.resolved_seen = true;
+                            if state.resolution.is_some() {
+                                counts.duplicate_resolves += 1;
+                            } else {
+                                state.resolution = Some(as_resolution(&event));
+                            }
+                        } else {
+                            state.reopen_seen = true;
+                            if state.resolution.take().is_some() {
+                                state.reopened = Some(as_resolution(&event));
+                            } else {
+                                state.redundant_reopens += 1;
+                            }
+                        }
                     }
-                    if resolves.contains_key(&resolve.id) {
-                        counts.duplicate_resolves += 1;
-                    } else {
-                        resolves.insert(resolve.id.clone(), resolve);
-                    }
+                    Err(_) => counts.malformed += 1,
                 }
-                Err(_) => counts.malformed += 1,
-            },
+            }
             _ => counts.unknown += 1,
         }
     }
 
-    for id in resolves.keys() {
-        if !cuts.contains_key(id) {
-            counts.orphans += 1;
+    for (id, state) in &states {
+        if cuts.contains_key(id) {
+            counts.redundant_reopens += state.redundant_reopens;
+        } else {
+            if state.resolved_seen {
+                counts.orphans += 1;
+            }
+            if state.reopen_seen {
+                counts.orphan_reopens += 1;
+            }
         }
     }
     let mut items: Vec<_> = cuts
         .into_values()
         .map(|cut| {
-            let resolution = resolves.get(&cut.id).map(|resolve| Resolution {
-                ts: resolve.ts.clone(),
-                agent: resolve.agent.clone(),
-                note: resolve.note.clone(),
-            });
+            let state = states.remove(&cut.id).unwrap_or_default();
             ListItem {
-                status: if resolution.is_some() {
+                status: if state.resolution.is_some() {
                     ItemStatus::Resolved
                 } else {
                     ItemStatus::Open
                 },
                 cut,
-                resolution,
+                resolution: state.resolution,
+                reopened: state.reopened,
             }
         })
         .collect();
@@ -345,7 +384,9 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
         counts.duplicate_resolves,
         "duplicate resolve",
     );
+    warning(&mut warnings, counts.redundant_reopens, "redundant reopen");
     warning(&mut warnings, counts.orphans, "orphan resolve");
+    warning(&mut warnings, counts.orphan_reopens, "orphan reopen");
     FoldResult { items, warnings }
 }
 
@@ -384,6 +425,97 @@ mod tests {
             "agent":"a", "note":null
         })
         .to_string()
+    }
+
+    fn status_event(kind: &str, id: &str, ts: &str, note: &str) -> String {
+        serde_json::json!({
+            "kind":kind, "id":id, "ts":ts, "agent":"a", "note":note
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn reopen_events_replay_in_file_order_per_id() {
+        let id = compute_id("2026-07-09T00:00:00.000Z", "a", "x", Severity::Minor, &[]);
+        let resolve_a = status_event("resolve", &id, "2026-07-10T00:00:00.000Z", "first");
+        let reopen = status_event("reopen", &id, "2026-07-11T00:00:00.000Z", "handed off");
+        let resolve_b = status_event("resolve", &id, "2026-07-12T00:00:00.000Z", "second");
+        let cases = [
+            (
+                "resolve then reopen",
+                format!("{}\n{resolve_a}\n{reopen}\n", cut(&id)),
+                ItemStatus::Open,
+                None,
+                Some("handed off"),
+                0,
+            ),
+            (
+                "reopen then resolve records the new resolution",
+                format!("{}\n{resolve_a}\n{reopen}\n{resolve_b}\n", cut(&id)),
+                ItemStatus::Resolved,
+                Some("second"),
+                Some("handed off"),
+                0,
+            ),
+            (
+                "status events before the cut line still replay in order",
+                format!("{resolve_a}\n{reopen}\n{resolve_b}\n{}\n", cut(&id)),
+                ItemStatus::Resolved,
+                Some("second"),
+                Some("handed off"),
+                0,
+            ),
+            (
+                "reopen of an open cut is redundant",
+                format!("{}\n{reopen}\n", cut(&id)),
+                ItemStatus::Open,
+                None,
+                None,
+                1,
+            ),
+            (
+                "second resolve without a reopen stays a duplicate",
+                format!("{}\n{resolve_a}\n{resolve_b}\n", cut(&id)),
+                ItemStatus::Resolved,
+                Some("first"),
+                None,
+                1,
+            ),
+            (
+                "orphan reopen",
+                format!(
+                    "{}\n{}\n",
+                    cut(&id),
+                    status_event("reopen", "pc_deadbeef0000", "2026-07-11T00:00:00.000Z", "x")
+                ),
+                ItemStatus::Open,
+                None,
+                None,
+                1,
+            ),
+        ];
+        for (name, input, status, resolution_note, reopen_note, warning_count) in cases {
+            let folded = fold_bytes(input.as_bytes());
+            assert_eq!(folded.items.len(), 1, "{name}");
+            let item = &folded.items[0];
+            assert_eq!(item.status, status, "{name}");
+            assert_eq!(
+                item.resolution.as_ref().and_then(|r| r.note.as_deref()),
+                resolution_note,
+                "{name}"
+            );
+            assert_eq!(
+                item.reopened.as_ref().and_then(|r| r.note.as_deref()),
+                reopen_note,
+                "{name}"
+            );
+            assert_eq!(
+                folded.warnings.len(),
+                warning_count,
+                "{name}: {:?}",
+                folded.warnings
+            );
+        }
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub struct ResolveRecord {
     pub note: Option<String>,
 }
 
+/// A `reopen` event has the same shape as a `resolve` event, with `kind: "reopen"`.
+pub type ReopenRecord = ResolveRecord;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution {
     pub ts: String,
@@ -87,6 +90,9 @@ pub struct ListItem {
     pub status: ItemStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    /// The most recent reopen that took effect; omitted when the cut was never reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened: Option<Resolution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

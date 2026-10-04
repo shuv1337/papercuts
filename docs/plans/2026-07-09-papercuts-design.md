@@ -1,6 +1,6 @@
 # papercuts — design doc
 
-2026-07-09. Coordinator-authored. Status: r5 — amended for Wave 2 evidence, multi-resolve behavior, and lexical `related` matching with advisory dedup. See Amendments for full triage provenance.
+2026-07-09. Coordinator-authored. Status: r6 — amended for Wave 2 evidence, multi-resolve behavior, lexical `related` matching with advisory dedup, and `reopen`. See Amendments for full triage provenance.
 
 ## Thesis and provenance
 
@@ -21,6 +21,7 @@ papercuts add <TEXT | ->        # file a papercut ('-' reads text from stdin)
 papercuts list                  # read papercuts (default: open only, severity-first then newest)
 papercuts related <TEXT>        # rank open and resolved cuts by lexical relevance (read-only; see r5)
 papercuts resolve <ID>...       # mark one or more papercuts resolved (append-only events)
+papercuts reopen <ID>...        # reopen resolved papercuts (append-only events; see r6)
 papercuts schema [all|record|error|exit-codes]   # machine contract, self-orientation
 papercuts doctor                # validate the log file (diagnose-only)
 ```
@@ -103,8 +104,8 @@ Resolve event:
 ### Materialized output shapes (normative)
 
 `add` data: `{"changed":bool,"record":{cut fields},"related"?:[RelatedMatch…],"related_resolution"?:{"ts","agent","note"}}`; `related` and `related_resolution` are omitted when empty (see r5). `related` data: `{"items":[RelatedMatch…],"count":N,"total":M,"truncated":bool}` where `RelatedMatch` = `"score"` plus every `ListItem` field. `resolve` with one ID returns `{"changed":bool,"record":{cut plus resolution}}`; with two or more IDs it returns `{"changed":bool,"records":[cut plus resolution...]}`.
-`list` data: `{"items":[ListItem…],"count":N,"total":M,"truncated":bool}` where `ListItem` = all cut fields + `"status":"open"|"resolved"` + `"resolution":{"ts","agent","note"}` (present only when resolved; `note` null when absent).
-`doctor` data: `{"healthy":bool,"findings":[{"line":N,"kind":"torn_line|malformed|unknown_kind|orphan_resolve|duplicate_cut|id_conflict|conflict_marker|gitignored","message":"…"}],"checked_lines":N}`.
+`list` data: `{"items":[ListItem…],"count":N,"total":M,"truncated":bool}` where `ListItem` = all cut fields + `"status":"open"|"resolved"` + `"resolution":{"ts","agent","note"}` (present only when resolved; `note` null when absent) + `"reopened":{"ts","agent","note"}` (the latest reopen that took effect; omitted when never reopened). `reopen` returns the same `{changed,record}` / `{changed,records:[...]}` shapes as `resolve`.
+`doctor` data: `{"healthy":bool,"findings":[{"line":N,"kind":"torn_line|malformed|unknown_kind|orphan_resolve|orphan_reopen|duplicate_cut|id_conflict|conflict_marker|gitignored","message":"…"}],"checked_lines":N}`.
 `schema` data: the contract object (version, commands with `read_only`/`appends`/`destructive` flags, env vars, error codes, exit codes, record + ListItem shapes). Representative instances of every shape are pinned by deserialization tests.
 - `ts` = UTC RFC3339 milliseconds. `PAPERCUTS_NOW` env (RFC3339) overrides the clock for reproducible tests — documented, not hidden.
 - Unknown `kind` values are skipped by `list` with a `meta.warnings` count (forward compatibility) but flagged by `doctor`.
@@ -131,7 +132,7 @@ Concurrency (r3-hardened): mutations may perform syntactic normalization and for
 1. Read lines in file order. A final line without a trailing `\n` is **torn**: skip it, count it in `meta.warnings`, never fail the whole read.
 2. Lines that fail to parse, or parse to an unknown `kind`, are skipped and counted in `meta.warnings` (forward compatibility; `doctor` reports them with line numbers).
 3. `cut` events: **first occurrence of an ID wins**; later duplicates are ignored (this is what makes git concat-merges and idempotent-add races self-healing). Evidence is excluded from the ID, so duplicate-ID adds keep the first cut and do not store later evidence.
-4. `resolve` events: mark the ID resolved, recording the **first** resolve's `ts`/`agent`/`note`. A resolve whose ID has not been seen *by end of file* is an **orphan**: counted in `meta.warnings`, otherwise ignored (a resolve line may legitimately precede its cut line after a merge, so resolution status is computed after the full scan).
+4. `resolve` and `reopen` events (r6): for each ID, replay its status events in file order. A `resolve` on an open ID records that resolve's `ts`/`agent`/`note`; a `resolve` on an already-resolved ID is a duplicate (counted, ignored). A `reopen` on a resolved ID clears the resolution and records itself as `reopened`; a `reopen` on an open ID is redundant (counted, ignored). With no `reopen` events this is exactly first-resolve-wins. Status events whose ID has no cut *by end of file* are **orphans**: counted in `meta.warnings`, otherwise ignored (status lines may legitimately precede their cut line after a merge, so status is computed after the full scan).
 5. Sort for output: severity rank (blocker > major > minor), then `ts` descending, then `id` ascending; tags sorted within each record. Same ordering for every format — `md` output is deterministic.
 
 `--since` semantics: relative durations (`Nd`/`Nh`) are computed against the effective now (`PAPERCUTS_NOW` if set, else wall clock UTC). Absolute values must be full RFC3339 with offset (`Z` accepted); date-only input is rejected with a `suggested_fix` showing both forms (ambiguous timezone — reject, don't guess).
@@ -211,6 +212,9 @@ Agents kept filing papercuts that were already logged, or already fixed, under d
 - `add` advisory (normative): the exact-ID duplicate check is unchanged and still returns the existing record. Otherwise new content is **always** appended. After a successful append, `add` ranks the pre-append folded snapshot (top 3 with score ≥ 0.35) and returns them as `related`. When the top match is resolved and scores ≥ 0.70, `add` also returns that cut's resolution as `related_resolution` and adds a `see_also:` warning. Neither can block, fail, or change the append. Advisories are computed outside the append path, from the snapshot read under the lock.
 - `add --no-check` skips only the advisory computation; exact-ID dedup still runs. `add --dry-run` appends nothing and computes no advisories.
 - Semantic ranking (FastEmbed embeddings fused with BM25 via RRF) was evaluated against the production log and dropped. On this small, jargon-dense corpus it tracked BM25 rather than correcting it, and it added a ~90 MB model and ~6 s per `add`. Ranking stays purely lexical, so the tool keeps no runtime model dependency.
+## Amendments (r6, reopen 2026-10-04)
+
+Resolutions could not be corrected: `resolve` on a resolved cut is an idempotent no-op, so a resolution note that later became false (a fix abandoned, or work handed off to an issue tracker) stayed false forever. r6 adds `papercuts reopen <ID>... [--note] [--agent] [--dry-run]`, which appends a `reopen` event (same shape as `resolve`, `kind:"reopen"`) for each resolved ID, under the same exclusive-lock read → fold → decide → append section, prefix matching, and multi-ID rules as `resolve`. Already-open IDs are idempotent successes with `changed:false` and an `already open` warning (count/list form when mixed). Correcting a note is `reopen` then `resolve`. Fold step 4 now replays status events per ID in file order, so logs without `reopen` fold exactly as before. Older binaries skip `reopen` lines as unknown events and keep showing the first resolution. That fallback is safe, and it is the documented forward-compatibility behaviour. `doctor` accepts `reopen` lines and reports `orphan_reopen`. Nothing rewrites the log.
 
 ## Wave plan
 
