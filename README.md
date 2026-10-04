@@ -25,6 +25,7 @@ Papercuts live in an **append-only JSONL file** — by default `.papercuts.jsonl
 papercuts add "text"            # file a papercut (also: papercuts log, or pipe stdin to add -)
 papercuts list                  # open papercuts, severity-first then newest, JSON envelope
 papercuts list --format md      # human review digest
+papercuts related "text"         # rank open/resolved cuts by lexical BM25/tag/repo relevance
 papercuts resolve pc_9f2c        # mark one fixed (unique ID prefix ok)
 papercuts resolve pc_9f2c pc_a81e # resolve several atomically
 papercuts add "tool failed" --cmd 'tool --flag' --exit 1 --stderr-file /tmp/stderr

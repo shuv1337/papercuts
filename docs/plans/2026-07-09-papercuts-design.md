@@ -1,6 +1,6 @@
 # papercuts — design doc
 
-2026-07-09. Coordinator-authored. Status: r4 — amended for Wave 2 evidence and multi-resolve behavior. See Amendments for full triage provenance.
+2026-07-09. Coordinator-authored. Status: r5 — amended for Wave 2 evidence, multi-resolve behavior, and lexical `related` matching with advisory dedup. See Amendments for full triage provenance.
 
 ## Thesis and provenance
 
@@ -19,6 +19,7 @@ Binary and crate: `papercuts` (crates.io name verified free 2026-07-09; bare `pa
 ```text
 papercuts add <TEXT | ->        # file a papercut ('-' reads text from stdin)
 papercuts list                  # read papercuts (default: open only, severity-first then newest)
+papercuts related <TEXT>        # rank open and resolved cuts by lexical relevance (read-only; see r5)
 papercuts resolve <ID>...       # mark one or more papercuts resolved (append-only events)
 papercuts schema [all|record|error|exit-codes]   # machine contract, self-orientation
 papercuts doctor                # validate the log file (diagnose-only)
@@ -101,7 +102,7 @@ Resolve event:
 
 ### Materialized output shapes (normative)
 
-`add` data: `{"changed":bool,"record":{cut fields}}`. `resolve` with one ID returns `{"changed":bool,"record":{cut plus resolution}}`; with two or more IDs it returns `{"changed":bool,"records":[cut plus resolution...]}`.
+`add` data: `{"changed":bool,"record":{cut fields},"related"?:[RelatedMatch…],"related_resolution"?:{"ts","agent","note"}}`; `related` and `related_resolution` are omitted when empty (see r5). `related` data: `{"items":[RelatedMatch…],"count":N,"total":M,"truncated":bool}` where `RelatedMatch` = `"score"` plus every `ListItem` field. `resolve` with one ID returns `{"changed":bool,"record":{cut plus resolution}}`; with two or more IDs it returns `{"changed":bool,"records":[cut plus resolution...]}`.
 `list` data: `{"items":[ListItem…],"count":N,"total":M,"truncated":bool}` where `ListItem` = all cut fields + `"status":"open"|"resolved"` + `"resolution":{"ts","agent","note"}` (present only when resolved; `note` null when absent).
 `doctor` data: `{"healthy":bool,"findings":[{"line":N,"kind":"torn_line|malformed|unknown_kind|orphan_resolve|duplicate_cut|id_conflict|conflict_marker|gitignored","message":"…"}],"checked_lines":N}`.
 `schema` data: the contract object (version, commands with `read_only`/`appends`/`destructive` flags, env vars, error codes, exit codes, record + ListItem shapes). Representative instances of every shape are pinned by deserialization tests.
@@ -169,7 +170,7 @@ Nothing else. No tokio, no color crates, no config-file crate, no git library.
 
 - No server, sync, or telemetry — the file is the product.
 - No TUI, no interactive anything.
-- No dedup/clustering/AI summarization of cuts (the reviewing agent can do that; this tool is the substrate).
+- No clustering or AI summarization of cuts (the reviewing agent can do that; this tool is the substrate). Dedup is advisory only (r5): `add` reports likely related cuts but never refuses or merges content.
 - No Windows CI (nothing platform-specific in the design; just untested).
 - No `edit`/`delete` of history — append-only is a feature; nothing rewrites the file in v1 (`doctor --fix` deferred to v2 with backup/undo/dry-run).
 - No config file.
@@ -200,6 +201,16 @@ Second decorrelated review: 1 blocker, 12 major, 1 minor. Triage:
 Wave 2 adds optional cut evidence without changing the v1 identity or fold rules. A cut may carry `evidence` with optional `cmd`, integer `exit`, `stderr`, and `note` fields; absent fields are omitted during serialization, and stderr is read and redacted in full before its sanitized value is capped at 4096 valid UTF-8 bytes. To keep memory bounded, `--stderr-file` rejects regular files over 1 MiB rather than raw-truncating them before redaction. On Unix it opens the path nonblocking, then validates metadata from that opened handle; symlinks therefore resolve to a regular-file handle when accepted, while a FIFO, device, directory, or a symlink resolving to one is rejected. Evidence strings pass a deterministic best-effort redactor for assignment/header forms involving key, token, secret, password, authorization, and bearer, plus long high-entropy token shapes. It preserves structurally obvious paths and URLs, including repository-relative paths and schemeless hostnames, but this remains heuristic and does not make raw environment dumps safe to submit.
 
 Evidence is not included in the content-addressed ID. Duplicate cut events remain first-cut-wins, and duplicate-ID `add` returns the first record with a `duplicate_cut` warning stating that later evidence was not stored. Resolve events remain first-resolve-wins. Multi-ID `resolve` may normalize and format-validate arguments before discovery and locking, then performs all state-dependent matching, status checks, and append decisions under one exclusive-lock critical section; one ID retains `{changed,record}`, while two or more IDs return `{changed,records:[...]}` in canonical ID order. Validation failures append nothing.
+
+## Amendments (r5, related matching and advisory dedup 2026-08-20)
+
+Agents kept filing papercuts that were already logged, or already fixed, under different wording. r5 adds a read-only relevance probe and makes `add` point at likely duplicates without ever blocking new content.
+
+- `papercuts related <TEXT> [--tag TAG]... [--limit N] [--min-score F]` ranks folded cuts, open and resolved, against the text. Defaults: `--limit 5`, `--min-score 0.0`. It takes a shared lock only; it is not a status filter. Discovery follows the usual rules: an explicit missing `--file` is `not_found` (66), and a discovered-missing default reads as empty.
+- Score (normative), capped at 1.0 and rounded to 6 decimals: `bm25/(bm25+1.0)` over tokenized cut text (k1 = 1.2, b = 0.75), plus `0.15 ×` the Jaccard similarity of the query tags and the cut tags, plus `0.10` when the query repo exactly equals the cut repo. A match is returned only if its score is above 0 and at least `--min-score`. Results sort by score descending, then open before resolved, then `id` ascending, so ranking is deterministic.
+- `add` advisory (normative): the exact-ID duplicate check is unchanged and still returns the existing record. Otherwise new content is **always** appended. After a successful append, `add` ranks the pre-append folded snapshot (top 3 with score ≥ 0.35) and returns them as `related`. When the top match is resolved and scores ≥ 0.70, `add` also returns that cut's resolution as `related_resolution` and adds a `see_also:` warning. Neither can block, fail, or change the append. Advisories are computed outside the append path, from the snapshot read under the lock.
+- `add --no-check` skips only the advisory computation; exact-ID dedup still runs. `add --dry-run` appends nothing and computes no advisories.
+- Semantic ranking (FastEmbed embeddings fused with BM25 via RRF) was evaluated against the production log and dropped. On this small, jargon-dense corpus it tracked BM25 rather than correcting it, and it added a ~90 MB model and ~6 s per `add`. Ranking stays purely lexical, so the tool keeps no runtime model dependency.
 
 ## Wave plan
 

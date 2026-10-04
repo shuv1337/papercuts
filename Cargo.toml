@@ -1,6 +1,6 @@
 [package]
 name = "papercuts"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 description = "A tiny CLI for AI agents to log the papercuts they hit during work."

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0] - 2026-08-20
+
+### Added
+
+- Add `papercuts related "text"` to rank open and resolved cuts by lexical BM25 relevance with small tag/repo boosts.
+
+### Changed
+
+- Make fuzzy matches on `papercuts add` advisory-only: new content is always appended after the exact-ID duplicate check, with related matches and possible resolved fixes returned informationally (never blocking).
+- Repurpose `papercuts add --no-check` to skip advisory related-match computation only.
+
+Note: an earlier iteration of this release added FastEmbed-based semantic scoring fused with BM25 via RRF. It was evaluated against the production log and dropped before shipping: on this tool's small, jargon-dense corpus, embedding similarity tracked BM25 rather than correcting it (two topically-distinct cuts sharing vocabulary still scored >=0.95 either way), while adding a real ~90MB model dependency and ~6s of latency per `add`. Not worth it; `related` stays pure lexical BM25 + tag Jaccard + repo match, unchanged from the original plan.
+
+## [0.3.0] - 2026-08-20 (superseded, never released; folded into 0.5.0 above)
+
+### Added
+
+- Add `papercuts related "text"` to rank open and resolved cuts by lexical BM25 relevance with small tag/repo boosts.
+- Add fuzzy `papercuts add` pre-flight checking: resolved high-confidence matches refuse to append and return the prior resolution, while open/lower-confidence matches are returned as non-blocking `related` suggestions.
+- Add `papercuts add --no-check` to bypass fuzzy pre-flight while keeping exact-ID duplicate protection.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added
@@ -26,5 +47,7 @@
 
 - Initial release.
 
+[0.5.0]: https://github.com/treygoff24/papercuts/compare/v0.3.0...v0.5.0
+[0.3.0]: https://github.com/treygoff24/papercuts/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/treygoff24/papercuts/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/treygoff24/papercuts/releases/tag/v0.1.0
