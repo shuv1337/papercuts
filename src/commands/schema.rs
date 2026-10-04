@@ -6,8 +6,9 @@ pub fn contract(target: SchemaTarget) -> Value {
     let records = json!({
         "cut": {"kind":"cut","id":"pc_<12 lowercase hex>","ts":"RFC3339 UTC milliseconds","agent":"string","text":"string <= 10000 bytes","tags":["string"],"severity":"minor|major|blocker","cwd":"absolute path","repo":"absolute path|null","evidence":"optional {cmd:string,exit:integer,stderr:string,note:string}; absent fields omitted; values best-effort redacted"},
         "resolve": {"kind":"resolve","id":"pc_<12 lowercase hex>","ts":"RFC3339 UTC milliseconds","agent":"string","note":"string|null"},
-        "list_item": {"cut":"all cut fields","status":"open|resolved","resolution":"{ts,agent,note}|omitted"},
-        "related_match": {"score":"0.0..1.0 rounded to 6 decimals; BM25 raw_score/(raw_score+1.0) + 0.15 tag Jaccard + 0.10 exact repo match, capped at 1.0","cut":"all cut fields","status":"open|resolved","resolution":"{ts,agent,note}|omitted"}
+        "reopen": {"kind":"reopen","id":"pc_<12 lowercase hex>","ts":"RFC3339 UTC milliseconds","agent":"string","note":"string|null"},
+        "list_item": {"cut":"all cut fields","status":"open|resolved","resolution":"{ts,agent,note}|omitted","reopened":"{ts,agent,note} of the latest reopen that took effect|omitted"},
+        "related_match": {"score":"0.0..1.0 rounded to 6 decimals; BM25 raw_score/(raw_score+1.0) + 0.15 tag Jaccard + 0.10 exact repo match, capped at 1.0","cut":"all cut fields","status":"open|resolved","resolution":"{ts,agent,note}|omitted","reopened":"{ts,agent,note}|omitted"}
     });
     let errors = json!({
         "shape": {"ok":false,"error":{"code":"string","message":"string","details":{},"retryable":false,"suggested_fix":"string"},"meta":{"contract":1}},
@@ -26,6 +27,7 @@ pub fn contract(target: SchemaTarget) -> Value {
                 "list": {"flags":{"--status":"open|resolved|all; default open","--agent":"NAME","--tag":"TAG","--severity":"minor|major|blocker","--since":"full RFC3339|Nd|Nh","--limit":"N; default 50","--format":"json|md; default json"},"output":"{items,count,total,truncated}; md is raw markdown","read_only":true,"appends":false,"destructive":false},
                 "related": {"positional":"TEXT","flags":{"--tag":"TAG; repeatable; boosts matching tags","--limit":"N; default 5","--min-score":"F; default 0.0"},"output":"{items:[related_match],count,total,truncated}; ranks open and resolved cuts by lexical BM25/tag/repo score; read-only probe, not a status filter","read_only":true,"appends":false,"destructive":false},
                 "resolve": {"positional":"one or more IDs; optional pc_ plus at least 4 hex digits each","flags":{"--note":"TEXT; leading hyphens accepted","--agent":"NAME","--dry-run":"boolean"},"output":{"one":"{changed,record-with-resolution}","two_or_more":"{changed,records:[...]}; IDs are canonicalized, sorted, and duplicate inputs collapse; mixed already-resolved IDs warn with a sorted count/list"},"read_only":false,"appends":true,"destructive":false},
+                "reopen": {"positional":"one or more IDs; optional pc_ plus at least 4 hex digits each","flags":{"--note":"TEXT; leading hyphens accepted","--agent":"NAME","--dry-run":"boolean"},"output":{"one":"{changed,record-with-reopened}","two_or_more":"{changed,records:[...]}; IDs are canonicalized, sorted, and duplicate inputs collapse; mixed already-open IDs warn with a sorted count/list"},"notes":"appends one reopen event per resolved ID; a later resolve records a fresh resolution, which is how a stale resolution note is corrected","read_only":false,"appends":true,"destructive":false},
                 "schema": {"positional":"all|record|error|exit-codes; default all","read_only":true,"appends":false,"destructive":false},
                 "doctor": {"flags":{},"output":"{healthy,findings,checked_lines}","exit_codes":{"0":"healthy","1":"findings"},"read_only":true,"appends":false,"destructive":false}
             },

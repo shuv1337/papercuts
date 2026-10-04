@@ -28,6 +28,7 @@ papercuts list --format md      # human review digest
 papercuts related "text"         # rank open/resolved cuts by lexical BM25/tag/repo relevance
 papercuts resolve pc_9f2c        # mark one fixed (unique ID prefix ok)
 papercuts resolve pc_9f2c pc_a81e # resolve several atomically
+papercuts reopen pc_9f2c --note "fix abandoned"  # reopen; resolve again to record a new note
 papercuts add "tool failed" --cmd 'tool --flag' --exit 1 --stderr-file /tmp/stderr
 papercuts add "bad response" --evidence 'request_id=abc123'
 papercuts schema                # full machine contract — agents self-orient with this
@@ -37,7 +38,7 @@ papercuts doctor                # validate the log file
 - **Agent-first contract**: stdout is data only; one JSON envelope per command; structured errors on stderr with stable codes, documented exit codes, and a paste-ready `suggested_fix`. `papercuts schema` returns the whole contract.
 - **Concurrency-safe**: multiple agents on one file are fine (advisory locking, atomic appends, self-healing torn lines).
 - **Deterministic**: content-addressed IDs, stable sort, reproducible-clock override for tests.
-- **Never rewrites history**: `resolve` appends an event; the log is a journal, not a database.
+- **Never rewrites history**: `resolve` and `reopen` append events; the log is a journal, not a database. To correct a resolution note, `reopen` and then `resolve` again.
 - **Evidence is bounded and redacted**: `add` can attach a failed command (`--cmd`), exit status (`--exit`), UTF-8 stderr file (`--stderr-file`), or free-form note (`--evidence`). `--stderr-file` rejects non-regular files and inputs over 1 MiB before sanitized stderr is stored up to 4096 UTF-8 bytes. Redaction is best-effort, so never feed raw environment dumps.
 
 ## Give your agents the pen

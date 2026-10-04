@@ -154,7 +154,7 @@ pub fn run(
     Ok(0)
 }
 
-fn normalize_prefix(input: &str) -> AppResult<String> {
+pub(crate) fn normalize_prefix(input: &str) -> AppResult<String> {
     let prefix = input
         .get(..3)
         .filter(|prefix| prefix.eq_ignore_ascii_case("pc_"))
@@ -168,7 +168,7 @@ fn normalize_prefix(input: &str) -> AppResult<String> {
     Ok(prefix.to_ascii_lowercase())
 }
 
-fn match_id(prefix: &str, items: &[ListItem]) -> AppResult<String> {
+pub(crate) fn match_id(prefix: &str, items: &[ListItem]) -> AppResult<String> {
     let mut candidates: Vec<_> = items
         .iter()
         .map(|item| item.cut.id.clone())

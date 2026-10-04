@@ -31,6 +31,7 @@ pub enum Command {
     List(ListArgs),
     Related(RelatedArgs),
     Resolve(ResolveArgs),
+    Reopen(ReopenArgs),
     Schema {
         #[arg(value_enum, default_value_t = SchemaTarget::All)]
         target: SchemaTarget,
@@ -126,6 +127,23 @@ pub struct ResolveArgs {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ReopenArgs {
+    #[arg(
+        value_name = "ID",
+        num_args = 1..,
+        required = true,
+        help = "One or more IDs or unique prefixes"
+    )]
+    pub ids: Vec<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub note: Option<String>,
+    #[arg(long)]
+    pub agent: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum StatusFilter {
     Open,
@@ -177,6 +195,7 @@ mod tests {
         assert!(Cli::try_parse_from(["papercuts", "list", "--format", "jsonl"]).is_err());
         assert!(Cli::try_parse_from(["papercuts", "add", "x", "--severity", "critical"]).is_err());
         assert!(Cli::try_parse_from(["papercuts", "resolve"]).is_err());
+        assert!(Cli::try_parse_from(["papercuts", "reopen"]).is_err());
         assert!(Cli::try_parse_from(["papercuts"]).is_err());
     }
 
@@ -195,6 +214,7 @@ mod tests {
                 "3",
             ],
             vec!["papercuts", "resolve", "abcd"],
+            vec!["papercuts", "reopen", "abcd", "--note", "handed off"],
             vec!["papercuts", "schema", "record"],
             vec!["papercuts", "doctor"],
         ] {

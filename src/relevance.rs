@@ -241,6 +241,7 @@ mod tests {
                 agent: "fixer".into(),
                 note: Some("fixed".into()),
             }),
+            reopened: None,
         }
     }
 
