@@ -1,6 +1,6 @@
 # papercuts — design doc
 
-2026-07-09. Coordinator-authored. Status: r6 — amended for Wave 2 evidence, multi-resolve behavior, lexical `related` matching with advisory dedup, and `reopen`. See Amendments for full triage provenance.
+2026-07-09. Coordinator-authored. Status: r7 — amended for Wave 2 evidence, multi-resolve behavior, lexical `related` matching with advisory dedup, `reopen`, and labeled multi-source reads. See Amendments for full triage provenance.
 
 ## Thesis and provenance
 
@@ -28,7 +28,7 @@ papercuts doctor                # validate the log file (diagnose-only)
 
 `log` is an alias of `add` (the verb people will guess from Steve's post); `add` is canonical.
 
-Global flags: `--file <PATH>` (explicit log file, overrides discovery; relative paths resolve against cwd) and `--pretty` (pretty-print JSON output; no-op for `--format md`). No `--quiet` in v1 (cut — its interaction with data output was underspecified; warnings ride in `meta`, which is already machine-skippable). No color anywhere, ever (agent-only tool; there is nothing to colorize — output is JSON).
+Global flags: `--file <PATH>` (explicit log file, overrides discovery; relative paths resolve against cwd; repeatable as `--file [LABEL=]PATH` on read commands, see r7) and `--pretty` (pretty-print JSON output; no-op for `--format md`). No `--quiet` in v1 (cut — its interaction with data output was underspecified; warnings ride in `meta`, which is already machine-skippable). No color anywhere, ever (agent-only tool; there is nothing to colorize — output is JSON).
 
 ### `add`
 
@@ -215,6 +215,17 @@ Agents kept filing papercuts that were already logged, or already fixed, under d
 ## Amendments (r6, reopen 2026-10-04)
 
 Resolutions could not be corrected: `resolve` on a resolved cut is an idempotent no-op, so a resolution note that later became false (a fix abandoned, or work handed off to an issue tracker) stayed false forever. r6 adds `papercuts reopen <ID>... [--note] [--agent] [--dry-run]`, which appends a `reopen` event (same shape as `resolve`, `kind:"reopen"`) for each resolved ID, under the same exclusive-lock read → fold → decide → append section, prefix matching, and multi-ID rules as `resolve`. Already-open IDs are idempotent successes with `changed:false` and an `already open` warning (count/list form when mixed). Correcting a note is `reopen` then `resolve`. Fold step 4 now replays status events per ID in file order, so logs without `reopen` fold exactly as before. Older binaries skip `reopen` lines as unknown events and keep showing the first resolution. That fallback is safe, and it is the documented forward-compatibility behaviour. `doctor` accepts `reopen` lines and reports `orphan_reopen`. Nothing rewrites the log.
+
+## Amendments (r7, labeled multi-source reads 2026-10-11)
+
+One user runs agents on several machines. Filing over SSH into one central log made filing depend on the network, and a server would break the no-server non-goal. So each machine keeps its own local log, and r7 lets the read commands fold several logs at once, labeling every cut with the log it came from. Writes are unchanged.
+
+- `--file` takes `[LABEL=]PATH` and may be repeated on `list`, `related`, and `doctor`. It is declared on the root command and on every subcommand rather than as a clap global, because a clap global keeps only the values from the last side of the subcommand. `papercuts --file a list --file b` reads both, root values first.
+- Zero or one unlabeled `--file` keeps r6 behavior exactly: discovery, `meta.file`, and every output byte are unchanged. Two or more values, or any `LABEL=PATH`, switch to labeled mode. In labeled mode every source is explicit (missing → `not_found`, 66), each `list_item`/`related_match` gains `source:<label>`, each doctor finding gains `source`, `meta.file` is omitted, and `meta.sources` lists `{label,path}` in `--file` order. Markdown renders the agent as `agent@label`.
+- Label rule (normative): split on the first `=` only when the prefix matches `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and the path is non-empty; otherwise the whole value is a path. `./a=b.jsonl` stays a path. An unlabeled value in labeled mode takes its file stem as the label. A duplicate label, a duplicate absolute path, or a stem that is not a valid label is `invalid_argument` (2).
+- Fold (normative): each source folds independently under its own shared lock, with r6 rules unchanged. This is sound because a cut's resolve and reopen events are appended to the log that owns the cut. A status event in another log is an orphan there and never crosses logs. Items merge in `--file` order. A cut ID already seen in an earlier source is skipped with one `skipped N duplicate cut(s) across sources` warning. The merged set uses the one normative sort. Per-source fold warnings are prefixed with `LABEL: `. `doctor` sums `checked_lines` and is healthy only if every source is.
+- `add`, `resolve`, and `reopen` accept one unlabeled `--file` at most. More than one, or a label, is `invalid_argument` (2) before anything is read or appended. Multi-source reads are read-only by construction. Copies of another machine's log (for example via `rsync`) are snapshots, so resolving must happen on the owning machine.
+- No new error codes, no new record kinds, and no change to the ID or the on-disk format. `meta.contract` stays 1, because every new field is additive and only appears when a caller opts in.
 
 ## Wave plan
 

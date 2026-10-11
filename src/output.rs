@@ -8,6 +8,9 @@ pub struct Meta {
     pub contract: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Labeled sources in `--file` order; replaces `file` when a read spans labeled logs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -25,10 +28,17 @@ impl Default for Meta {
         Self {
             contract: 1,
             file: None,
+            sources: Vec::new(),
             agent_source: None,
             warnings: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceMeta {
+    pub label: String,
+    pub path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

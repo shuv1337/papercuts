@@ -37,6 +37,16 @@ When triaging open cuts in a papercut log (for example `~/.local/share/papercuts
 - **No GitHub repo is involved** (machine config, dotfiles, global `~/AGENTS.md`, `~/.local/bin` scripts, system services, installed tools): fix it directly, verify, and resolve with `--note` naming the fix and the verification. Ask before changing production, secrets, or system services.
 - **The repo is third-party upstream, has no GitHub remote, or belongs to a dead project** (GitHub issues turned off): do not file anything. Resolve the cut with `--note "Closed without fix: <reason>"`.
 
+Each machine keeps its own log (shuvdev and shuvbot both use `~/.local/share/papercuts/shuv.jsonl`). To triage them together from shuvdev, pull a read-only copy and read both logs labeled by host:
+
+```bash
+mkdir -p "$HOME/.local/share/papercuts/hosts"
+rsync -a shuvbot:.local/share/papercuts/shuv.jsonl "$HOME/.local/share/papercuts/hosts/shuvbot.jsonl"
+papercuts --file "shuvdev=$HOME/.local/share/papercuts/shuv.jsonl" --file "shuvbot=$HOME/.local/share/papercuts/hosts/shuvbot.jsonl" list --format md
+```
+
+The copy is a snapshot that the next `rsync` overwrites, so never resolve against it. Resolve a cut on the host named in its `source`, for example `ssh shuvbot 'papercuts --file "$HOME/.local/share/papercuts/shuv.jsonl" resolve <id> --note "..."'`.
+
 Already-fixed or obsolete cuts can be resolved directly, once an independent check confirms them. If a resolution note becomes untrue later (the fix is abandoned, or the cut is handed off), run `papercuts reopen <id> --note "<why>"` and then resolve it again with the correct note. A second `resolve` on its own is a no-op.
 
 ## Invariants (do not break)

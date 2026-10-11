@@ -93,6 +93,9 @@ pub struct ListItem {
     /// The most recent reopen that took effect; omitted when the cut was never reopened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reopened: Option<Resolution>,
+    /// Label of the log this cut was read from; only set when reading labeled or multiple logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
