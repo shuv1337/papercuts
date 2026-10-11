@@ -2766,3 +2766,283 @@ fn eight_way_reopen_race_appends_once() {
     assert_eq!(changed, 1);
     assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 3);
 }
+
+fn run_files(files: &[String], args: &[&str]) -> std::process::Output {
+    let mut command = command();
+    for file in files {
+        command.arg("--file").arg(file);
+    }
+    command.args(args).output().unwrap()
+}
+
+fn labeled(label: &str, path: &Path) -> String {
+    format!("{label}={}", path.display())
+}
+
+#[test]
+fn list_across_labeled_logs_tags_every_cut_with_its_source() {
+    let temp = TempDir::new().unwrap();
+    let dev = temp.path().join("shuv.jsonl");
+    let bot = temp.path().join("hosts/shuvbot.jsonl");
+    std::fs::create_dir_all(bot.parent().unwrap()).unwrap();
+    let dev_cut = add(&dev, "dev minor friction").data.record.id;
+    let output = run_file(
+        &bot,
+        &[
+            "add",
+            "bot blocker",
+            "--agent",
+            "codex",
+            "--severity",
+            "blocker",
+        ],
+    );
+    let bot_blocker = success::<AddData>(&output).data.record.id;
+    let bot_fixed = add(&bot, "bot fixed later").data.record.id;
+    success::<Value>(&run_file(&bot, &["resolve", &bot_fixed, "--note", "done"]));
+
+    let files = [labeled("shuvdev", &dev), labeled("shuvbot", &bot)];
+    let envelope: SuccessEnvelope<ListData> =
+        success(&run_files(&files, &["list", "--status", "all"]));
+    let got: Vec<_> = envelope
+        .data
+        .items
+        .iter()
+        .map(|item| (item.cut.id.as_str(), item.source.as_deref(), item.status))
+        .collect();
+    // Same fixed clock for every cut, so the minors tie-break by ID across sources.
+    let mut minors = vec![
+        (bot_fixed.as_str(), Some("shuvbot"), ItemStatus::Resolved),
+        (dev_cut.as_str(), Some("shuvdev"), ItemStatus::Open),
+    ];
+    minors.sort_by_key(|item| item.0);
+    let mut expected = vec![(bot_blocker.as_str(), Some("shuvbot"), ItemStatus::Open)];
+    expected.extend(minors);
+    assert_eq!(got, expected);
+    assert!(envelope.meta.file.is_none());
+    let sources: Vec<_> = envelope
+        .meta
+        .sources
+        .iter()
+        .map(|source| (source.label.as_str(), source.path.as_str()))
+        .collect();
+    assert_eq!(
+        sources,
+        vec![
+            ("shuvdev", dev.to_str().unwrap()),
+            ("shuvbot", bot.to_str().unwrap())
+        ]
+    );
+    let raw: Value = serde_json::from_slice(&run_files(&files, &["list"]).stdout).unwrap();
+    assert_eq!(raw["data"]["items"][0]["source"], "shuvbot");
+    assert!(raw["meta"].get("file").is_none());
+
+    let md = run_files(&files, &["list", "--format", "md"]);
+    let md = String::from_utf8(md.stdout).unwrap();
+    assert!(md.contains("bot blocker — codex@shuvbot, "), "{md}");
+    assert!(md.contains("dev minor friction — tester@shuvdev, "), "{md}");
+}
+
+#[test]
+fn file_values_on_both_sides_of_the_subcommand_are_all_read_and_stems_label_sources() {
+    let temp = TempDir::new().unwrap();
+    let dev = temp.path().join("shuvdev.jsonl");
+    let bot = temp.path().join("shuvbot.jsonl");
+    add(&dev, "dev cut");
+    add(&bot, "bot cut");
+    let output = command()
+        .arg("--file")
+        .arg(&dev)
+        .arg("list")
+        .arg("--file")
+        .arg(&bot)
+        .output()
+        .unwrap();
+    let envelope: SuccessEnvelope<ListData> = success(&output);
+    let mut sources: Vec<_> = envelope
+        .data
+        .items
+        .iter()
+        .map(|item| item.source.clone().unwrap())
+        .collect();
+    sources.sort();
+    assert_eq!(sources, ["shuvbot", "shuvdev"]);
+    let labels: Vec<_> = envelope
+        .meta
+        .sources
+        .iter()
+        .map(|s| s.label.as_str())
+        .collect();
+    assert_eq!(labels, ["shuvdev", "shuvbot"]);
+}
+
+#[test]
+fn single_unlabeled_file_keeps_the_original_shape_and_single_label_opts_in() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("log.jsonl");
+    add(&file, "only cut");
+    let plain: Value = serde_json::from_slice(&run_file(&file, &["list"]).stdout).unwrap();
+    assert!(plain["data"]["items"][0].get("source").is_none());
+    assert_eq!(plain["meta"]["file"], file.to_str().unwrap());
+    assert!(plain["meta"].get("sources").is_none());
+
+    let files = [labeled("box", &file)];
+    let labeled_out: Value = serde_json::from_slice(&run_files(&files, &["list"]).stdout).unwrap();
+    assert_eq!(labeled_out["data"]["items"][0]["source"], "box");
+    assert_eq!(labeled_out["meta"]["sources"][0]["label"], "box");
+    assert!(labeled_out["meta"].get("file").is_none());
+}
+
+#[test]
+fn sources_fold_independently_and_duplicate_ids_keep_the_first_source() {
+    let temp = TempDir::new().unwrap();
+    let first = temp.path().join("first.jsonl");
+    let second = temp.path().join("second.jsonl");
+    let shared = add(&first, "same cut in both logs").data.record.id;
+    add(&second, "same cut in both logs");
+    // A resolve for a cut owned by another log is an orphan in its own log, not a cross-log resolve.
+    let mut log = OpenOptions::new().append(true).open(&second).unwrap();
+    writeln!(
+        log,
+        "{}",
+        json!({"kind":"resolve","id":shared,"ts":"2026-07-10T00:00:00.000Z","agent":"x","note":null})
+    )
+    .unwrap();
+    writeln!(
+        log,
+        "{}",
+        json!({"kind":"resolve","id":"pc_deadbeef0000","ts":"2026-07-10T00:00:00.000Z","agent":"x","note":null})
+    )
+    .unwrap();
+    drop(log);
+
+    let files = [labeled("a", &first), labeled("b", &second)];
+    let envelope: SuccessEnvelope<ListData> =
+        success(&run_files(&files, &["list", "--status", "all"]));
+    assert_eq!(envelope.data.items.len(), 1);
+    assert_eq!(envelope.data.items[0].source.as_deref(), Some("a"));
+    assert_eq!(envelope.data.items[0].status, ItemStatus::Open);
+    assert_eq!(
+        envelope.meta.warnings,
+        [
+            "b: skipped 1 orphan resolve",
+            "skipped 1 duplicate cut across sources"
+        ]
+    );
+}
+
+#[test]
+fn related_across_sources_reports_the_source_of_each_match() {
+    let temp = TempDir::new().unwrap();
+    let dev = temp.path().join("dev.jsonl");
+    let bot = temp.path().join("bot.jsonl");
+    add(&dev, "cargo build cache keeps missing on tmpfs");
+    add(&bot, "ssh tunnel drops after sleep");
+    let files = [labeled("dev", &dev), labeled("bot", &bot)];
+    let envelope: SuccessEnvelope<RelatedData> =
+        success(&run_files(&files, &["related", "ssh tunnel drops"]));
+    assert_eq!(envelope.data.items[0].item.source.as_deref(), Some("bot"));
+    assert_eq!(envelope.meta.sources.len(), 2);
+}
+
+#[test]
+fn doctor_across_sources_labels_findings_and_sums_checked_lines() {
+    let temp = TempDir::new().unwrap();
+    let dev = temp.path().join("dev.jsonl");
+    let bot = temp.path().join("bot.jsonl");
+    add(&dev, "healthy cut");
+    add(&bot, "cut before tear");
+    let mut log = OpenOptions::new().append(true).open(&bot).unwrap();
+    log.write_all(b"{\"kind\":").unwrap();
+    drop(log);
+
+    let files = [labeled("dev", &dev), labeled("bot", &bot)];
+    let output = run_files(&files, &["doctor"]);
+    assert_eq!(output.status.code(), Some(1));
+    let envelope: SuccessEnvelope<DoctorData> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!envelope.data.healthy);
+    assert_eq!(envelope.data.checked_lines, 3);
+    let findings: Vec<_> = envelope
+        .data
+        .findings
+        .iter()
+        .map(|finding| {
+            (
+                finding.source.as_deref(),
+                finding.kind.as_str(),
+                finding.line,
+            )
+        })
+        .collect();
+    assert_eq!(findings, [(Some("bot"), "torn_line", 2)]);
+}
+
+#[test]
+fn multi_source_argument_errors_are_usage_errors() {
+    let temp = TempDir::new().unwrap();
+    let a = temp.path().join("a.jsonl");
+    let b = temp.path().join("nested/a.jsonl");
+    std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+    add(&a, "a");
+    add(&b, "b");
+
+    let same_stem = [a.display().to_string(), b.display().to_string()];
+    let envelope = error(&run_files(&same_stem, &["list"]), 2, "invalid_argument");
+    assert!(envelope.error.message.contains("source label 'a'"));
+
+    let same_label = [labeled("x", &a), labeled("x", &b)];
+    error(&run_files(&same_label, &["list"]), 2, "invalid_argument");
+
+    let same_path = [labeled("x", &a), labeled("y", &a)];
+    error(&run_files(&same_path, &["doctor"]), 2, "invalid_argument");
+
+    let hidden = temp.path().join(".jsonl");
+    std::fs::write(&hidden, "").unwrap();
+    let no_stem = [a.display().to_string(), hidden.display().to_string()];
+    let envelope = error(
+        &run_files(&no_stem, &["related", "x"]),
+        2,
+        "invalid_argument",
+    );
+    assert!(envelope.error.suggested_fix.contains("LABEL=PATH"));
+
+    let missing = [
+        labeled("a", &a),
+        labeled("gone", &temp.path().join("gone.jsonl")),
+    ];
+    error(&run_files(&missing, &["list"]), 66, "not_found");
+    error(&run_files(&missing, &["doctor"]), 66, "not_found");
+    error(&run_files(&missing, &["related", "x"]), 66, "not_found");
+}
+
+#[test]
+fn mutations_refuse_multiple_or_labeled_files_and_append_nothing() {
+    let temp = TempDir::new().unwrap();
+    let a = temp.path().join("a.jsonl");
+    let b = temp.path().join("b.jsonl");
+    let id = add(&a, "a").data.record.id;
+    let before = std::fs::read(&a).unwrap();
+    let two = [a.display().to_string(), b.display().to_string()];
+    let one_labeled = [labeled("a", &a)];
+    for files in [&two[..], &one_labeled[..]] {
+        for args in [
+            vec!["add", "new cut"],
+            vec!["resolve", id.as_str()],
+            vec!["reopen", id.as_str()],
+        ] {
+            error(&run_files(files, &args), 2, "invalid_argument");
+        }
+    }
+    assert_eq!(std::fs::read(&a).unwrap(), before);
+    assert!(!b.exists());
+
+    // `./` keeps a name containing '=' a plain path for mutations.
+    let odd = temp.path().join("x=y.jsonl");
+    let output = command()
+        .current_dir(temp.path())
+        .args(["--file", "./x=y.jsonl", "add", "odd name"])
+        .output()
+        .unwrap();
+    success::<AddData>(&output);
+    assert!(odd.exists());
+}

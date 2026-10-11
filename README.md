@@ -73,6 +73,17 @@ Duplicate lines after a merge are harmless — the fold is first-wins and `paper
 
 **Private.** Prefer not to commit them? `echo .papercuts.jsonl >> .gitignore`, or point `PAPERCUTS_FILE` somewhere else entirely. Outside a git repo, papercuts go to `~/.papercuts/log.jsonl`.
 
+**Several machines.** Each machine files to its own local log, so filing never depends on the network. To review them together, copy the other logs somewhere local and pass every log to `list`, `related`, or `doctor` with a `LABEL=` prefix. Use `$HOME` rather than `~`, since shells don't expand `~` after `LABEL=` reliably.
+
+```bash
+rsync -a shuvbot:.local/share/papercuts/shuv.jsonl "$HOME/.local/share/papercuts/hosts/shuvbot.jsonl"
+papercuts --file "shuvdev=$HOME/.local/share/papercuts/shuv.jsonl" \
+          --file "shuvbot=$HOME/.local/share/papercuts/hosts/shuvbot.jsonl" \
+          list --format md
+```
+
+Each cut then carries `"source":"shuvbot"` (rendered as `agent@shuvbot` in markdown), and `meta.sources` lists every label and path. Without a `LABEL=`, the file stem is the label. Each log is folded on its own, and a cut that appears in two logs is shown once, from the first. `add`, `resolve`, and `reopen` still write to exactly one log, so resolve a cut on the machine whose log owns it. A resolve written to a local copy would be overwritten by the next sync.
+
 ## Contract
 
 Everything an agent needs is in `papercuts schema`: commands and flags with read-only/appends annotations, env vars (`PAPERCUTS_FILE`, `PAPERCUTS_AGENT`, `PAPERCUTS_NOW`), record shapes, error codes, and the exit-code dictionary (0 success · 2 usage · 65 bad input · 66 not found · 70 internal · 74 I/O · 75 lock timeout, retryable · 77 permission denied · 78 config). Empty results are exit 0, never errors.

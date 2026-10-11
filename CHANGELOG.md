@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0] - 2026-10-11
+
+### Added
+
+- Read several logs at once: `list`, `related`, and `doctor` accept repeated `--file [LABEL=]PATH` values, before or after the subcommand. Each cut (and each doctor finding) carries `source:<label>`, `meta.sources` lists every `{label,path}`, and markdown shows `agent@label`. Without a label, the file stem is used. Each log folds on its own; a cut that appears in two logs is shown once, from the first.
+
+### Changed
+
+- `--file` values whose text before the first `=` is a valid label (`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`) are now read as `LABEL=PATH`. Prefix such a file name with `./` to keep it a plain path.
+- `add`, `resolve`, and `reopen` now reject more than one `--file`, or a labeled one, with `invalid_argument` (exit 2) before reading or appending anything. An empty `--file` value is also `invalid_argument`.
+
 ## [0.5.0] - 2026-08-20
 
 ### Added

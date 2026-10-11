@@ -242,6 +242,7 @@ mod tests {
                 note: Some("fixed".into()),
             }),
             reopened: None,
+            source: None,
         }
     }
 

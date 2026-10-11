@@ -1,4 +1,4 @@
-use crate::cli::{ListArgs, OutputFormat, StatusFilter};
+use crate::cli::{FileSpec, ListArgs, OutputFormat, StatusFilter};
 use crate::error::{AppError, AppResult};
 use crate::output::{self, Meta};
 use crate::store;
@@ -6,7 +6,6 @@ use crate::{ItemStatus, ListItem, Severity, parse_since};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListData {
@@ -16,27 +15,13 @@ pub struct ListData {
     pub truncated: bool,
 }
 
-pub fn run(args: ListArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -> AppResult<i32> {
-    let resolved = store::discover(file)?;
-    let mut warnings = Vec::new();
-    let folded = match store::with_shared(&resolved.path, |log| {
-        let bytes = store::read_bytes(log, &resolved.path)?;
-        Ok(store::fold_bytes(&bytes))
-    }) {
-        Ok(folded) => folded,
-        Err(error) if error.code == "not_found" && error.exit_code == 66 => {
-            if resolved.explicit {
-                return Err(AppError::not_found(
-                    format!("papercuts file not found: {}", resolved.path.display()),
-                    "Pass an existing --file PATH or run `papercuts add` to create a discovered default file.",
-                ));
-            }
-            warnings.push("no papercuts file yet; papercuts add creates it".into());
-            store::FoldResult::default()
-        }
-        Err(error) => return Err(error),
-    };
-    warnings.extend(folded.warnings);
+pub fn run(args: ListArgs, files: Vec<FileSpec>, pretty: bool, now: Timestamp) -> AppResult<i32> {
+    let plan = store::discover_read(files)?;
+    let folded = store::fold_plan(
+        &plan,
+        "Pass an existing --file PATH or run `papercuts add` to create a discovered default file.",
+    )?;
+    let mut warnings = folded.warnings;
     let since = args
         .since
         .as_deref()
@@ -88,7 +73,7 @@ pub fn run(args: ListArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) 
         write_markdown(&data.items, &warnings)?;
     } else {
         let mut meta = Meta::new();
-        meta.file = Some(resolved.path.to_string_lossy().into_owned());
+        plan.apply_meta(&mut meta);
         meta.warnings = warnings;
         output::write_success(data, pretty, meta)
             .map_err(|error| AppError::from_io(error, std::path::Path::new("stdout")))?;
@@ -127,9 +112,13 @@ fn write_markdown(items: &[ListItem], warnings: &[String]) -> AppResult<()> {
             } else {
                 format!(" ({})", item.cut.tags.join(","))
             };
+            let source = item
+                .source
+                .as_ref()
+                .map_or_else(String::new, |label| format!("@{label}"));
             writeln!(
                 output,
-                "- [{id}] {} — {}, {}{tags}",
+                "- [{id}] {} — {}{source}, {}{tags}",
                 item.cut.text, item.cut.agent, item.cut.ts
             )
             .map_err(|error| AppError::from_io(error, std::path::Path::new("stdout")))?;

@@ -1,7 +1,9 @@
+use crate::cli::{FileSpec, is_valid_label};
 use crate::error::{AppError, AppResult};
+use crate::output::{Meta, SourceMeta};
 use crate::{CutRecord, ItemStatus, ListItem, Resolution, ResolveRecord};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -94,6 +96,170 @@ pub fn discover(flag: Option<PathBuf>) -> AppResult<ResolvedFile> {
         explicit: false,
         repo: None,
     })
+}
+
+/// One log a read command folds. `label` is set only in labeled (multi-source) mode.
+#[derive(Debug, Clone)]
+pub struct SourceFile {
+    pub label: Option<String>,
+    pub path: PathBuf,
+    pub explicit: bool,
+}
+
+/// The logs a read-only command (`list`, `related`, `doctor`) folds.
+#[derive(Debug, Clone)]
+pub struct ReadPlan {
+    pub sources: Vec<SourceFile>,
+    pub repo: Option<PathBuf>,
+}
+
+impl ReadPlan {
+    pub fn labeled(&self) -> bool {
+        self.sources.iter().any(|source| source.label.is_some())
+    }
+
+    /// Single-source reads report `meta.file`; labeled reads report `meta.sources` instead.
+    pub fn apply_meta(&self, meta: &mut Meta) {
+        if self.labeled() {
+            meta.sources = self
+                .sources
+                .iter()
+                .map(|source| SourceMeta {
+                    label: source.label.clone().unwrap_or_default(),
+                    path: source.path.to_string_lossy().into_owned(),
+                })
+                .collect();
+        } else if let Some(source) = self.sources.first() {
+            meta.file = Some(source.path.to_string_lossy().into_owned());
+        }
+    }
+}
+
+/// Resolves `--file` values for a read command. Zero or one unlabeled value keeps the
+/// single-file discovery rules; two or more values, or any `LABEL=PATH`, switch to labeled
+/// mode where every source is explicit and every cut carries its source label.
+pub fn discover_read(files: Vec<FileSpec>) -> AppResult<ReadPlan> {
+    let labeled = files.len() > 1 || files.iter().any(|spec| spec.label.is_some());
+    if !labeled {
+        let resolved = discover(files.into_iter().next().map(|spec| spec.path))?;
+        return Ok(ReadPlan {
+            sources: vec![SourceFile {
+                label: None,
+                path: resolved.path,
+                explicit: resolved.explicit,
+            }],
+            repo: resolved.repo,
+        });
+    }
+    let cwd = std::env::current_dir().map_err(|error| AppError::from_io(error, Path::new(".")))?;
+    let repo = find_repo_root(&cwd);
+    let mut labels = HashSet::new();
+    let mut paths = HashSet::new();
+    let mut sources = Vec::with_capacity(files.len());
+    for spec in files {
+        let path = absolute(&cwd, spec.path);
+        let label = match spec.label {
+            Some(label) => label,
+            None => path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| is_valid_label(stem))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    AppError::invalid_argument(
+                        format!("cannot derive a source label from {}", path.display()),
+                        "Name the source explicitly with --file LABEL=PATH (LABEL: letters, digits, '.', '_', '-').",
+                    )
+                })?,
+        };
+        if !paths.insert(path.clone()) {
+            return Err(AppError::invalid_argument(
+                format!("--file {} was given more than once", path.display()),
+                "Pass each log once.",
+            ));
+        }
+        if !labels.insert(label.clone()) {
+            return Err(AppError::invalid_argument(
+                format!("source label '{label}' is used by more than one --file"),
+                "Give each log a distinct label with --file LABEL=PATH.",
+            ));
+        }
+        sources.push(SourceFile {
+            label: Some(label),
+            path,
+            explicit: true,
+        });
+    }
+    Ok(ReadPlan { sources, repo })
+}
+
+/// Folds every source in the plan under a shared lock each. An explicit missing source is
+/// `not_found` (66) with `missing_fix`; a discovered missing default reads as empty.
+pub fn fold_plan(plan: &ReadPlan, missing_fix: &str) -> AppResult<FoldResult> {
+    let mut parts = Vec::with_capacity(plan.sources.len());
+    for source in &plan.sources {
+        let folded = match with_shared(&source.path, |log| {
+            let bytes = read_bytes(log, &source.path)?;
+            Ok(fold_bytes(&bytes))
+        }) {
+            Ok(folded) => folded,
+            Err(error) if error.code == "not_found" && error.exit_code == 66 => {
+                if source.explicit {
+                    return Err(AppError::not_found(
+                        format!("papercuts file not found: {}", source.path.display()),
+                        missing_fix,
+                    ));
+                }
+                FoldResult {
+                    items: Vec::new(),
+                    warnings: vec!["no papercuts file yet; papercuts add creates it".into()],
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        parts.push((source.label.clone(), folded));
+    }
+    if !plan.labeled() {
+        return Ok(parts.pop().map(|(_, folded)| folded).unwrap_or_default());
+    }
+    Ok(merge_sources(
+        parts
+            .into_iter()
+            .map(|(label, folded)| (label.unwrap_or_default(), folded))
+            .collect(),
+    ))
+}
+
+/// Merges per-source folds in `--file` order. Each source folds independently (a cut's
+/// status events live in the log that owns it); a cut ID seen in an earlier source wins.
+pub fn merge_sources(parts: Vec<(String, FoldResult)>) -> FoldResult {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    let mut warnings = Vec::new();
+    let mut duplicates = 0;
+    for (label, part) in parts {
+        warnings.extend(
+            part.warnings
+                .into_iter()
+                .map(|warning| format!("{label}: {warning}")),
+        );
+        for mut item in part.items {
+            if seen.insert(item.cut.id.clone()) {
+                item.source = Some(label.clone());
+                items.push(item);
+            } else {
+                duplicates += 1;
+            }
+        }
+    }
+    sort_items(&mut items);
+    if duplicates > 0 {
+        warnings.push(format!(
+            "skipped {duplicates} duplicate cut{} across sources",
+            if duplicates == 1 { "" } else { "s" }
+        ));
+    }
+    FoldResult { items, warnings }
 }
 
 pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
@@ -359,20 +525,11 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
                 cut,
                 resolution: state.resolution,
                 reopened: state.reopened,
+                source: None,
             }
         })
         .collect();
-    items.sort_by(|left, right| {
-        let left_ts = left.cut.ts.parse::<jiff::Timestamp>().ok();
-        let right_ts = right.cut.ts.parse::<jiff::Timestamp>().ok();
-        right
-            .cut
-            .severity
-            .rank()
-            .cmp(&left.cut.severity.rank())
-            .then_with(|| right_ts.cmp(&left_ts))
-            .then_with(|| left.cut.id.cmp(&right.cut.id))
-    });
+    sort_items(&mut items);
 
     let mut warnings = Vec::new();
     warning(&mut warnings, counts.torn, "torn final line");
@@ -388,6 +545,21 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
     warning(&mut warnings, counts.orphans, "orphan resolve");
     warning(&mut warnings, counts.orphan_reopens, "orphan reopen");
     FoldResult { items, warnings }
+}
+
+/// The one normative sort: severity first, then newest, then ID.
+fn sort_items(items: &mut [ListItem]) {
+    items.sort_by(|left, right| {
+        let left_ts = left.cut.ts.parse::<jiff::Timestamp>().ok();
+        let right_ts = right.cut.ts.parse::<jiff::Timestamp>().ok();
+        right
+            .cut
+            .severity
+            .rank()
+            .cmp(&left.cut.severity.rank())
+            .then_with(|| right_ts.cmp(&left_ts))
+            .then_with(|| left.cut.id.cmp(&right.cut.id))
+    });
 }
 
 fn warning(warnings: &mut Vec<String>, count: usize, label: &str) {
